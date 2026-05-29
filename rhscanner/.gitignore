@@ -1,0 +1,7 @@
+build/
+*.o
+*.out
+*.a
+*.so
+rhscanner
+compile_commands.json
