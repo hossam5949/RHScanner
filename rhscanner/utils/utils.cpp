@@ -18,6 +18,8 @@
 #include <memory>
 #include <netinet/in.h>  // in_addr
 #include <sstream>
+#include <cstdio>
+#include <cstring>
 #include <stdexcept>
 
 namespace rhs {
@@ -404,20 +406,39 @@ void PortRange::parseCSV(const std::string& csv, bool seen[]) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 void ResultStore::addResult(const ScanResult& result) {
-    // TODO (M3)
-    (void)result;
+    // Upsert: if the key already exists the new result overwrites it.
+    // In M3 (serial scan) each (ip, port) pair is written exactly once,
+    // but M5/M6 may call addResult again to enrich an existing entry.
+    std::lock_guard<std::mutex> lock(mutex_);
+    Key k{ result.ip, result.port };
+    results_[k] = result;
 }
 
 std::vector<ScanResult> ResultStore::getResults() const {
-    // TODO (M3)
-    return {};
+    // Returns all results in sorted order (map iteration order = key order
+    // = lexicographic IP string then ascending port — good enough for M3).
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ScanResult> out;
+    out.reserve(results_.size());
+    for (const auto& kv : results_) {
+        out.push_back(kv.second);
+    }
+    return out;
 }
 
 void ResultStore::updateService(const std::string& ip, uint16_t port,
                                 const std::string& name,
                                 const std::string& version) {
-    // TODO (M5)
-    (void)ip; (void)port; (void)name; (void)version;
+    std::lock_guard<std::mutex> lock(mutex_);
+    Key k{ ip, port };
+    auto it = results_.find(k);
+    if (it != results_.end()) {
+        it->second.serviceName    = name;
+        it->second.serviceVersion = version;
+    }
+    // If the key is not found the probe result was never stored — no-op.
+    // This cannot happen in normal flow (tcpConnect always calls addResult
+    // before postProcess calls updateService), but is safe to ignore.
 }
 
 void ResultStore::updateOS(const std::string& ip, uint16_t port,
@@ -535,15 +556,90 @@ void OutputFormatter::printHelp() {
 }
 
 void OutputFormatter::printResults(const std::vector<ScanResult>& results) const {
-    // TODO (M3/M7)
-    (void)results;
-    std::cout << "[OutputFormatter::printResults — implemented in M3]\n";
+    // ── Filter: verbosity 0 shows only Open; verbosity ≥ 1 shows all ──────
+    std::vector<const ScanResult*> rows;
+    rows.reserve(results.size());
+    for (const auto& r : results) {
+        if (verbosity_ >= 1 || r.state == PortState::Open) {
+            rows.push_back(&r);
+        }
+    }
+
+    if (rows.empty()) {
+        std::cout << "  No open ports found.\n\n";
+        return;
+    }
+
+    // ── Column widths ──────────────────────────────────────────────────────
+    // IP: 15 chars (longest dotted-decimal: "xxx.xxx.xxx.xxx")
+    // PORT: 5 chars (max "65535")
+    // STATE: 8 chars ("FILTERED")
+    // SERVICE: 12 chars (populated in M5; blank in M3)
+    const int W_IP      = 16;
+    const int W_PORT    = 6;
+    const int W_STATE   = 10;
+    const int W_SERVICE = 14;
+
+    // ── Header ────────────────────────────────────────────────────────────
+    std::cout << "\n";
+    std::cout << ansi::BOLD
+              << std::left
+              << std::setw(W_IP)      << "  IP"
+              << std::setw(W_PORT)    << "PORT"
+              << std::setw(W_STATE)   << "STATE"
+              << std::setw(W_SERVICE) << "SERVICE"
+              << ansi::RESET << "\n";
+
+    // Separator line
+    int totalWidth = W_IP + W_PORT + W_STATE + W_SERVICE;
+    std::cout << "  " << std::string(static_cast<size_t>(totalWidth - 2), '-') << "\n";
+
+    // ── Rows ───────────────────────────────────────────────────────────────
+    for (const auto* rp : rows) {
+        const ScanResult& r = *rp;
+
+        // Colour the state column
+        std::string stateStr  = stateLabel(r.state);
+        std::string stateCol  = stateColor(r.state);
+
+        // Pad the coloured state manually — ANSI codes add invisible chars
+        // that confuse std::setw, so we pad before colourising.
+        std::string statePadded = stateStr
+            + std::string(static_cast<size_t>(W_STATE) > stateStr.size()
+                          ? W_STATE - stateStr.size() : 0, ' ');
+
+        std::cout << std::left
+                  << std::setw(W_IP)   << ("  " + r.ip)
+                  << std::setw(W_PORT) << r.port
+                  << stateCol << ansi::BOLD << statePadded << ansi::RESET
+                  << std::setw(W_SERVICE) << r.serviceName  // blank in M3
+                  << "\n";
+    }
+
+    std::cout << "\n";
 }
 
 void OutputFormatter::printScanSummary(int openCount, int totalProbes,
                                        double elapsedSeconds) const {
-    // TODO (M7)
-    (void)openCount; (void)totalProbes; (void)elapsedSeconds;
+    // Format elapsed time as Xs or Xms depending on magnitude.
+    std::string elapsed;
+    if (elapsedSeconds >= 1.0) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.2fs", elapsedSeconds);
+        elapsed = buf;
+    } else {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.0fms", elapsedSeconds * 1000.0);
+        elapsed = buf;
+    }
+
+    std::cout << "  "
+              << ansi::BOLD << openCount << ansi::RESET
+              << " open port" << (openCount != 1 ? "s" : "")
+              << " found out of "
+              << ansi::BOLD << totalProbes << ansi::RESET
+              << " probe" << (totalProbes != 1 ? "s" : "")
+              << "  (" << elapsed << ")\n\n";
 }
 
 void OutputFormatter::printProgress(int done, int total) const {
