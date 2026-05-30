@@ -55,6 +55,48 @@ int main(int argc, char* argv[]) {
     //
     // TODO (M3): Scanner::run() will block here until all probes finish.
     //
+    // M2 debug: print what was parsed so we can verify ArgumentParser output.
+    {
+        std::cout << "  Parsed config:\n";
+        std::cout << "    IPs          : " << cfg.targetIPs.size() << " addresses";
+        if (cfg.targetIPs.size() <= 5) {
+            std::cout << "  [";
+            for (size_t i = 0; i < cfg.targetIPs.size(); ++i) {
+                if (i) std::cout << ", ";
+                std::cout << cfg.targetIPs[i];
+            }
+            std::cout << "]";
+        } else {
+            std::cout << "  [" << cfg.targetIPs.front()
+                      << " … " << cfg.targetIPs.back() << "]";
+        }
+        std::cout << "\n";
+
+        std::cout << "    Ports        : " << cfg.targetPorts.size() << " ports";
+        if (cfg.targetPorts.size() <= 8) {
+            std::cout << "  [";
+            for (size_t i = 0; i < cfg.targetPorts.size(); ++i) {
+                if (i) std::cout << ", ";
+                std::cout << cfg.targetPorts[i];
+            }
+            std::cout << "]";
+        } else {
+            std::cout << "  [" << cfg.targetPorts.front()
+                      << " … " << cfg.targetPorts.back() << "]";
+        }
+        std::cout << "\n";
+
+        std::cout << "    Port scan    : " << (cfg.doPortScan      ? "yes" : "no") << "\n";
+        std::cout << "    Service det. : " << (cfg.doServiceDetect ? "yes" : "no") << "\n";
+        std::cout << "    OS detect.   : " << (cfg.doOSDetect      ? "yes" : "no") << "\n";
+        std::cout << "    Banner grab  : " << (cfg.doBannerGrab    ? "yes" : "no") << "\n";
+        std::cout << "    Recon mode   : " << (cfg.reconMode       ? "yes" : "no") << "\n";
+        std::cout << "    Threads      : " << cfg.numThreads << "\n";
+        std::cout << "    Timeout      : " << cfg.timeoutMs << " ms\n";
+        std::cout << "    Verbosity    : " << cfg.verbosity << "\n";
+        std::cout << "\n";
+    }
+
     rhs::Scanner scanner(cfg, store, logger);
     scanner.run();
 

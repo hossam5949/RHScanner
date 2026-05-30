@@ -96,14 +96,17 @@ public:
     explicit IPRange(const std::string& expr);
 
     // Returns the list of individual IP strings this expression expands to.
-    std::vector<std::string> expand() const;
+    std::vector<std::string> expand()    const;
+    bool                     isValid()   const;
 
-    bool isValid() const;
+    // Human-readable description of the parse error, or "" if valid.
+    const std::string&       errorMsg()  const;
 
 private:
     std::string              expr_;
     std::vector<std::string> expanded_;
-    bool                     valid_ = false;
+    bool                     valid_    = false;
+    std::string              errorMsg_;
 
     void parseSingle(const std::string& ip);
     void parseLastOctetRange(const std::string& base, int lo, int hi);
@@ -126,17 +129,21 @@ class PortRange {
 public:
     explicit PortRange(const std::string& expr);
 
-    std::vector<uint16_t> expand() const;
-    bool isValid() const;
+    std::vector<uint16_t>  expand()   const;
+    bool                   isValid()  const;
+
+    // Human-readable description of the parse error, or "" if valid.
+    const std::string&     errorMsg() const;
 
 private:
     std::string            expr_;
     std::vector<uint16_t>  expanded_;
-    bool                   valid_ = false;
+    bool                   valid_    = false;
+    std::string            errorMsg_;
 
     void parseSingle(uint16_t port);
     void parseRange(uint16_t lo, uint16_t hi);
-    void parseCSV(const std::string& csv);
+    void parseCSV(const std::string& csv, bool seen[]);
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
