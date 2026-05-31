@@ -4,12 +4,16 @@
 //  os/os.h
 //
 //  IFingerprintStrategy — abstract strategy interface (Open/Closed principle).
-//  TTLFingerprintStrategy — concrete strategy using ICMP TTL values.
-//  OSDetector — runs all registered strategies and merges their guesses.
+//  BannerOSStrategy     — passive banner-based OS inference (no raw sockets).
+//  TTLFingerprintStrategy — TTL-based OS inference (requires icmpPing, stub).
+//  OSDetector           — runs all registered strategies and merges guesses.
 //
-//  Adding a new technique (TCP window, SYN flags, banner analysis) requires
-//  only a new IFingerprintStrategy subclass + one registerStrategy() call —
-//  no changes to OSDetector or any caller.
+//  M7 uses passive techniques only:
+//    - Banner analysis: SSH/HTTP/FTP/SMTP banners already collected by M6
+//      are inspected for OS-identifying strings.  Zero additional network I/O.
+//    - TTL fingerprinting: structured for future use when ICMP is available.
+//      The strategy is registered but analyze() returns confidence=0 in M7
+//      because icmpPing() is still a stub (requires CAP_NET_RAW).
 // ──────────────────────────────────────────────────────────────────────────────
 
 #include "utils/utils.h"
@@ -21,43 +25,73 @@
 namespace rhs {
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  IFingerprintStrategy  —  extension point for OS detection techniques
+//  IFingerprintStrategy  —  one OS-detection technique
 // ══════════════════════════════════════════════════════════════════════════════
 
 class IFingerprintStrategy {
 public:
     virtual ~IFingerprintStrategy() = default;
 
-    // Probe ip and return a guess. May perform network I/O.
-    // Must be safe to call concurrently from multiple threads.
-    virtual OSGuess analyze(const std::string& ip) const = 0;
+    // Analyse results already in the store for the given IP.
+    // Must be safe to call from a single thread (postProcess is serial).
+    virtual OSGuess analyzeResults(const std::string& ip,
+                                   const std::vector<ScanResult>& results) const = 0;
 
-    // Human-readable name of this strategy (used in debug logs).
     virtual std::string name() const = 0;
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  TTLFingerprintStrategy  —  ICMP echo → TTL → OS family
+//  BannerOSStrategy  —  infer OS from service banners (passive, no I/O)
 //
-//  TTL thresholds (industry standard defaults):
-//    255 → Cisco IOS / Solaris
-//    128 → Windows
-//     64 → Linux / macOS / BSD
-//     60 → older HP-UX
+//  Evidence gathered per IP:
+//    SSH banner  → "Ubuntu", "Debian", "FreeBSD", etc.
+//    HTTP Server → "IIS" → Windows, "nginx"/"Apache" → Linux
+//    FTP banner  → "Microsoft FTP" → Windows, "vsftpd"/"ProFTPD" → Linux
+//    SMTP banner → "Exchange" → Windows, "Postfix"/"Exim" → Linux
 //
-//  Confidence is moderate (60) because routers decrement TTL in transit.
+//  Each indicator contributes a confidence vote.  The votes are combined
+//  and normalised to [0,100].  Conflicting signals lower confidence.
+// ══════════════════════════════════════════════════════════════════════════════
+
+class BannerOSStrategy : public IFingerprintStrategy {
+public:
+    BannerOSStrategy() = default;
+
+    OSGuess     analyzeResults(const std::string& ip,
+                               const std::vector<ScanResult>& results) const override;
+    std::string name() const override { return "banner-passive"; }
+
+private:
+    struct Vote {
+        std::string family;
+        int         weight;     // positive strength of evidence
+        std::string reason;
+    };
+
+    // Extract OS evidence from a single ScanResult's banner + service.
+    std::vector<Vote> votesFromResult(const ScanResult& r) const;
+
+    // Collapse votes into one OSGuess.
+    static OSGuess mergeVotes(const std::vector<Vote>& votes);
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  TTLFingerprintStrategy  —  ICMP TTL → OS family
+//
+//  Registered but returns confidence=0 in M7 because icmpPing() is a stub
+//  (requires CAP_NET_RAW / root).  Structured for easy completion in a future
+//  milestone when raw socket support is added.
 // ══════════════════════════════════════════════════════════════════════════════
 
 class TTLFingerprintStrategy : public IFingerprintStrategy {
 public:
-    // timeoutMs — ICMP probe socket timeout
     explicit TTLFingerprintStrategy(int timeoutMs, Logger& logger);
 
-    OSGuess     analyze(const std::string& ip) const override;
-    std::string name()  const override;
+    OSGuess     analyzeResults(const std::string& ip,
+                               const std::vector<ScanResult>& results) const override;
+    std::string name() const override { return "ttl-fingerprint"; }
 
 private:
-    // Map a raw TTL value to an OS family + version hint.
     static OSGuess ttlToGuess(int ttl);
 
     int     timeoutMs_;
@@ -65,31 +99,24 @@ private:
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  OSDetector  —  aggregates strategies and returns the best guess
-//
-//  Usage:
-//    OSDetector detector;
-//    detector.registerStrategy(make_unique<TTLFingerprintStrategy>(...));
-//    OSGuess g = detector.detect("192.168.1.1");
+//  OSDetector  —  aggregates strategies, returns the best merged guess
 // ══════════════════════════════════════════════════════════════════════════════
 
 class OSDetector {
 public:
     OSDetector() = default;
 
-    // Take ownership of a strategy. Call before detect().
     void registerStrategy(std::unique_ptr<IFingerprintStrategy> strategy);
 
-    // Run all registered strategies and return the highest-confidence result.
-    // Returns OSGuess with confidence=0 / family="Unknown" if no strategies
-    // are registered or all fail.
-    OSGuess detect(const std::string& ip) const;
+    // Run all strategies against the collected results for ip.
+    // Returns OSGuess{confidence=0} if no strategy produces a result.
+    OSGuess detect(const std::string& ip,
+                   const std::vector<ScanResult>& results) const;
 
-    // Format a guess as a human-readable string, e.g. "Linux (confidence 60%)".
+    // Format a guess for display, e.g. "Linux  (confidence: 75%)".
     static std::string guessToString(const OSGuess& guess);
 
 private:
-    // Pick the guess with the highest confidence value.
     static OSGuess merge(const std::vector<OSGuess>& guesses);
 
     std::vector<std::unique_ptr<IFingerprintStrategy>> strategies_;

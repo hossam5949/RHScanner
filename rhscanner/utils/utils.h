@@ -35,12 +35,14 @@ struct OSGuess {
     std::string osFamily;    // "Linux", "Windows", "Cisco IOS", "Unknown"
     std::string osVersion;   // "3.x", "10", "" if unknown
     int         confidence;  // 0–100
+    std::string reasoning;   // human-readable explanation of how we guessed
 
-    OSGuess() : osFamily("Unknown"), osVersion(""), confidence(0) {}
-    OSGuess(std::string family, std::string version, int conf)
+    OSGuess() : osFamily("Unknown"), osVersion(""), confidence(0), reasoning("") {}
+    OSGuess(std::string family, std::string version, int conf, std::string reason = "")
         : osFamily(std::move(family))
         , osVersion(std::move(version))
         , confidence(conf)
+        , reasoning(std::move(reason))
     {}
 };
 
@@ -54,6 +56,7 @@ struct ScanResult {
     PortState   state          = PortState::Unknown;
     std::string serviceName;    // "http", "ssh", "" if unknown
     std::string serviceVersion; // from banner, may be empty
+    std::string rawBanner;      // raw bytes received from service
     OSGuess     osGuess;
     int         ttl            = -1;  // raw TTL from ICMP probe, -1 = not probed
     bool        bannerGrabbed  = false;
@@ -83,12 +86,30 @@ struct ScanConfig {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  IPRange  —  parses and expands an IP expression into individual IPs
+//  HostResolver  —  resolves hostnames to IPv4 address strings via getaddrinfo
+//
+//  Preserves all existing IPv4/CIDR/range logic in IPRange.
+//  Called as a fallback when the expression is not a valid IPv4 address.
+// ══════════════════════════════════════════════════════════════════════════════
+
+class HostResolver {
+public:
+    // Resolve a hostname to a list of IPv4 addresses.
+    // Returns an empty vector if resolution fails.
+    static std::vector<std::string> resolve(const std::string& hostname);
+
+    // Return true if the string is a pure dotted-decimal IPv4 address.
+    static bool isIPv4(const std::string& s);
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  IPRange  —  parses and expands an IP/hostname expression
 //
 //  Supported formats:
-//    "192.168.1.10"          single host
+//    "192.168.1.10"          single IPv4 host
 //    "192.168.1.1-20"        last-octet range
 //    "192.168.1.0/24"        CIDR notation
+//    "google.com"            hostname resolved via getaddrinfo
 // ══════════════════════════════════════════════════════════════════════════════
 
 class IPRange {
@@ -111,6 +132,7 @@ private:
     void parseSingle(const std::string& ip);
     void parseLastOctetRange(const std::string& base, int lo, int hi);
     void parseCIDR(const std::string& ip, int prefix);
+    void resolveHostname(const std::string& hostname);
 
     static bool isValidIPv4(const std::string& ip);
 };
@@ -162,7 +184,8 @@ public:
 
     // Update only the service fields for an existing result. Thread-safe.
     void updateService(const std::string& ip, uint16_t port,
-                       const std::string& name, const std::string& version);
+                       const std::string& name, const std::string& version,
+                       const std::string& banner = "");
 
     // Update only the OS guess for an existing result. Thread-safe.
     void updateOS(const std::string& ip, uint16_t port, const OSGuess& guess);
@@ -206,21 +229,18 @@ class OutputFormatter {
 public:
     explicit OutputFormatter(int verbosity = 0);
 
-    // Print the "RH Scanner" banner with ANSI colours (R=pink, H=blue).
+    // Print the large ASCII-art RH Scanner banner.
     void printBanner() const;
 
     // Print the help/usage screen.
     static void printHelp();
 
-    // Print a formatted table of results.
+    // Print a formatted table of results including version and OS columns.
     void printResults(const std::vector<ScanResult>& results) const;
 
     // Print a one-line scan summary (open count, total, elapsed time).
     void printScanSummary(int openCount, int totalProbes,
                           double elapsedSeconds) const;
-
-    // Print an overwriting progress line to stderr.
-    void printProgress(int done, int total) const;
 
     // Print a formatted error message to stderr and exit.
     static void fatalError(const std::string& msg);
@@ -230,6 +250,9 @@ public:
 
 private:
     int verbosity_;
+
+    // Returns true if stdout is connected to a TTY (colour enabled).
+    static bool isTTY();
 
     static std::string colorize(const std::string& text,
                                 const std::string& ansiCode);
